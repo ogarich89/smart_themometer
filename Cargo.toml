@@ -1,0 +1,6 @@
+[workspace]
+
+members = [
+    "thermometer",
+    "temperature_generator"
+]
