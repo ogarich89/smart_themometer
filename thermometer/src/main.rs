@@ -1,24 +1,28 @@
 use std::{
     error::Error,
-    net::{ToSocketAddrs, UdpSocket},
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
+        Arc,
     },
-    thread,
     time::Duration,
+};
+
+use tokio::{
+    net::{ToSocketAddrs, UdpSocket},
+    sync::Mutex,
+    time,
 };
 
 #[derive(Default)]
 struct Temperature(Mutex<f32>);
 
 impl Temperature {
-    pub fn get(&self) -> f32 {
-        *self.0.lock().unwrap()
+    pub async fn get(&self) -> f32 {
+        *self.0.lock().await
     }
 
-    pub fn set(&self, val: f32) {
-        *self.0.lock().unwrap() = val
+    pub async fn set(&self, val: f32) {
+        *self.0.lock().await = val
     }
 }
 
@@ -29,9 +33,9 @@ struct SmartThermometer {
 }
 
 impl SmartThermometer {
-    fn new(address: impl ToSocketAddrs) -> Result<Self, Box<dyn Error>> {
-        let socket = UdpSocket::bind(address)?;
-        socket.set_read_timeout(Some(Duration::from_secs(2)))?;
+    async fn new(address: impl ToSocketAddrs) -> Result<Self, Box<dyn Error>> {
+        let socket = UdpSocket::bind(address).await?;
+        let timeout = Duration::from_secs(2);
 
         let connected = Arc::new(AtomicBool::new(false));
         let finished = Arc::new(AtomicBool::new(false));
@@ -41,19 +45,22 @@ impl SmartThermometer {
         let finished_clone = finished.clone();
         let temperature_clone = temperature.clone();
 
-        thread::spawn(move || loop {
-            if finished_clone.load(Ordering::SeqCst) {
-                return;
-            }
+        tokio::spawn(async move {
+            loop {
+                if finished_clone.load(Ordering::SeqCst) {
+                    return;
+                }
 
-            let mut buf = [0; 4];
-            if let Err(err) = socket.recv_from(&mut buf) {
-                connected_clone.store(false, Ordering::SeqCst);
-                println!("Can't receive datagram: {}", err);
-            } else {
-                connected_clone.store(true, Ordering::SeqCst);
+                let mut buf = [0; 4];
+
+                if let Err(err) = time::timeout(timeout, socket.recv_from(&mut buf)).await {
+                    connected_clone.store(false, Ordering::SeqCst);
+                    println!("Can't receive datagram: {}", err);
+                } else {
+                    connected_clone.store(true, Ordering::SeqCst);
+                }
+                temperature_clone.set(f32::from_be_bytes(buf)).await;
             }
-            temperature_clone.set(f32::from_be_bytes(buf));
         });
 
         Ok(Self {
@@ -62,8 +69,8 @@ impl SmartThermometer {
             finished,
         })
     }
-    pub fn get_temperature(&self) -> f32 {
-        self.temperature.get()
+    pub async fn get_temperature(&self) -> f32 {
+        self.temperature.get().await
     }
 }
 
@@ -72,12 +79,12 @@ impl Drop for SmartThermometer {
         self.finished.store(false, Ordering::SeqCst)
     }
 }
-
-fn main() {
-    let thermometer = SmartThermometer::new("127.0.0.1:3000").unwrap();
+#[tokio::main]
+async fn main() {
+    let thermometer = SmartThermometer::new("127.0.0.1:3000").await.unwrap();
     loop {
-        thread::sleep(Duration::from_secs(2));
-        let temperature = thermometer.get_temperature();
+        time::sleep(Duration::from_secs(2)).await;
+        let temperature = thermometer.get_temperature().await;
         if thermometer.connected.load(Ordering::SeqCst) {
             println!("The temperature is {}", temperature);
         }
